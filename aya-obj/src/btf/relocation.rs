@@ -19,7 +19,7 @@ use crate::{
     },
     thiserror::{self, Error},
     util::HashMap,
-    Object, Program, ProgramSection,
+    Function, Object, ProgramSection,
 };
 
 /// The error type returned by [`Object::relocate_btf`].
@@ -231,15 +231,22 @@ impl Object {
             };
             let section_name = program_section.name();
 
-            let program = self
+            let function = self
                 .programs
                 .get_mut(section_name)
+                .and_then(|x| self.functions.get_mut(&x.function_key()))
                 .ok_or(BtfRelocationError {
                     section: section_name.to_owned(),
                     error: RelocationError::ProgramNotFound,
                 })?;
-            match relocate_btf_program(program, relos, local_btf, target_btf, &mut candidates_cache)
-            {
+
+            match relocate_btf_function(
+                function,
+                relos,
+                local_btf,
+                target_btf,
+                &mut candidates_cache,
+            ) {
                 Ok(_) => {}
                 Err(error) => {
                     return Err(BtfRelocationError {
@@ -254,15 +261,15 @@ impl Object {
     }
 }
 
-fn relocate_btf_program<'target>(
-    program: &mut Program,
+fn relocate_btf_function<'target>(
+    function: &mut Function,
     relos: &[Relocation],
     local_btf: &Btf,
     target_btf: &'target Btf,
     candidates_cache: &mut HashMap<u32, Vec<Candidate<'target>>>,
 ) -> Result<(), RelocationError> {
     for rel in relos {
-        let instructions = &mut program.function.instructions;
+        let instructions = &mut function.instructions;
         let ins_index = rel.ins_offset / mem::size_of::<bpf_insn>();
         if ins_index >= instructions.len() {
             return Err(RelocationError::InvalidInstructionIndex {
@@ -343,7 +350,7 @@ fn relocate_btf_program<'target>(
             ComputedRelocation::new(rel, &local_spec, None)?
         };
 
-        comp_rel.apply(program, rel, local_btf, target_btf)?;
+        comp_rel.apply(function, rel, local_btf, target_btf)?;
     }
 
     Ok(())
@@ -861,12 +868,12 @@ impl ComputedRelocation {
 
     fn apply(
         &self,
-        program: &mut Program,
+        function: &mut Function,
         rel: &Relocation,
         local_btf: &Btf,
         target_btf: &Btf,
     ) -> Result<(), RelocationError> {
-        let instructions = &mut program.function.instructions;
+        let instructions = &mut function.instructions;
         let num_instructions = instructions.len();
         let ins_index = rel.ins_offset / mem::size_of::<bpf_insn>();
         let mut ins =
