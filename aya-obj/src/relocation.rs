@@ -3,7 +3,7 @@
 use core::mem;
 use std::collections::HashSet;
 
-use alloc::{borrow::ToOwned, string::String};
+use alloc::{borrow::ToOwned, collections::BTreeMap, string::String};
 use log::debug;
 use object::{SectionIndex, SymbolKind};
 
@@ -52,6 +52,15 @@ pub enum RelocationError {
         symbol_index: usize,
         /// The symbol name
         symbol_name: Option<String>,
+    },
+
+    /// Unknown function
+    #[error("program at section {section_index} and address {address:#x} was not found while relocating")]
+    UnknownProgram {
+        /// The function section index
+        section_index: usize,
+        /// The function address
+        address: u64,
     },
 
     /// Unknown function
@@ -118,11 +127,7 @@ impl Object {
             }
         }
 
-        let functions = self
-            .programs
-            .values_mut()
-            .map(|p| &mut p.function)
-            .chain(self.functions.values_mut());
+        let functions = self.functions.values_mut();
 
         for function in functions {
             if let Some(relocations) = self.relocations.get(&function.section_index) {
@@ -156,10 +161,13 @@ impl Object {
                 &self.symbol_table,
                 text_sections,
             );
-            linker.link(program).map_err(|error| BpfRelocationError {
+            let func = linker.link(program).map_err(|error| BpfRelocationError {
                 function: name.to_owned(),
                 error,
             })?;
+
+            self.functions
+                .insert((func.section_offset, func.address), func);
         }
 
         Ok(())
@@ -269,7 +277,7 @@ fn relocate_maps<'a, I: Iterator<Item = &'a Relocation>>(
 }
 
 struct FunctionLinker<'a> {
-    functions: &'a HashMap<(usize, u64), Function>,
+    functions: &'a BTreeMap<(usize, u64), Function>,
     linked_functions: HashMap<u64, usize>,
     relocations: &'a HashMap<SectionIndex, HashMap<u64, Relocation>>,
     symbol_table: &'a HashMap<usize, Symbol>,
@@ -278,7 +286,7 @@ struct FunctionLinker<'a> {
 
 impl<'a> FunctionLinker<'a> {
     fn new(
-        functions: &'a HashMap<(usize, u64), Function>,
+        functions: &'a BTreeMap<(usize, u64), Function>,
         relocations: &'a HashMap<SectionIndex, HashMap<u64, Relocation>>,
         symbol_table: &'a HashMap<usize, Symbol>,
         text_sections: &'a HashSet<usize>,
@@ -292,17 +300,21 @@ impl<'a> FunctionLinker<'a> {
         }
     }
 
-    fn link(mut self, program: &mut Program) -> Result<(), RelocationError> {
-        let mut fun = program.function.clone();
+    fn link(mut self, program: &mut Program) -> Result<Function, RelocationError> {
+        let fun = self
+            .functions
+            .get(&(program.section_index, program.address))
+            .ok_or_else(|| RelocationError::UnknownProgram {
+                section_index: program.section_index,
+                address: program.address,
+            })?;
+        let mut new_fun = fun.clone();
+
         // relocate calls in the program's main function. As relocation happens,
         // it will trigger linking in all the callees.
-        self.relocate(&mut fun, &program.function)?;
+        self.relocate(&mut new_fun, &fun)?;
 
-        // this now includes the program function plus all the other functions called during
-        // execution
-        program.function = fun;
-
-        Ok(())
+        Ok(new_fun)
     }
 
     fn link_function(

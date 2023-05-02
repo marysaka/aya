@@ -2,6 +2,7 @@
 
 use alloc::{
     borrow::ToOwned,
+    collections::BTreeMap,
     ffi::CString,
     string::{String, ToString},
     vec::Vec,
@@ -64,10 +65,10 @@ pub struct Object {
     /// in [ProgramSection]s as keys.
     pub programs: HashMap<String, Program>,
     /// Functions
-    pub functions: HashMap<(usize, u64), Function>,
+    pub functions: BTreeMap<(usize, u64), Function>,
     pub(crate) relocations: HashMap<SectionIndex, HashMap<u64, Relocation>>,
     pub(crate) symbol_table: HashMap<usize, Symbol>,
-    pub(crate) section_sizes: HashMap<String, u64>,
+    pub(crate) section_infos: HashMap<String, (SectionIndex, u64)>,
     // symbol_offset_by_name caches symbols that could be referenced from a
     // BTF VAR type so the offsets can be fixed up
     pub(crate) symbol_offset_by_name: HashMap<String, u64>,
@@ -84,8 +85,10 @@ pub struct Program {
     pub kernel_version: KernelVersion,
     /// The section containing the program
     pub section: ProgramSection,
-    /// The function
-    pub function: Function,
+    /// The section index of the program
+    pub section_index: usize,
+    /// The address of the program
+    pub address: u64,
 }
 
 /// An eBPF function
@@ -109,6 +112,30 @@ pub struct Function {
     pub func_info_rec_size: usize,
     /// Line info record size
     pub line_info_rec_size: usize,
+}
+
+impl Function {
+    fn sanitize(&mut self, features: &Features) {
+        for inst in &mut self.instructions {
+            if !insn_is_helper_call(inst) {
+                continue;
+            }
+
+            match inst.imm {
+                BPF_FUNC_PROBE_READ_USER | BPF_FUNC_PROBE_READ_KERNEL
+                    if !features.bpf_probe_read_kernel =>
+                {
+                    inst.imm = BPF_FUNC_PROBE_READ;
+                }
+                BPF_FUNC_PROBE_READ_USER_STR | BPF_FUNC_PROBE_READ_KERNEL_STR
+                    if !features.bpf_probe_read_kernel =>
+                {
+                    inst.imm = BPF_FUNC_PROBE_READ_STR;
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Section types containing eBPF programs
@@ -575,10 +602,10 @@ impl Object {
             btf_ext: None,
             maps: HashMap::new(),
             programs: HashMap::new(),
-            functions: HashMap::new(),
+            functions: BTreeMap::new(),
             relocations: HashMap::new(),
             symbol_table: HashMap::new(),
-            section_sizes: HashMap::new(),
+            section_infos: HashMap::new(),
             symbol_offset_by_name: HashMap::new(),
             has_struct_ops: false,
         }
@@ -645,7 +672,7 @@ impl Object {
         Ok(())
     }
 
-    fn parse_program(&self, section: &Section) -> Result<Program, ParseError> {
+    fn parse_program(&self, section: &Section) -> Result<(Program, Function), ParseError> {
         let prog_sec = ProgramSection::from_str(section.name)?;
         let name = prog_sec.name().to_owned();
 
@@ -663,22 +690,28 @@ impl Object {
                 (FuncSecInfo::default(), LineSecInfo::default(), 0, 0)
             };
 
-        Ok(Program {
-            license: self.license.clone(),
-            kernel_version: self.kernel_version,
-            section: prog_sec,
-            function: Function {
-                name,
-                address: section.address,
-                section_index: section.index,
-                section_offset: 0,
-                instructions: copy_instructions(section.data)?,
-                func_info,
-                line_info,
-                func_info_rec_size,
-                line_info_rec_size,
+        let function = Function {
+            name,
+            address: section.address,
+            section_index: section.index,
+            section_offset: 0,
+            instructions: copy_instructions(section.data)?,
+            func_info,
+            line_info,
+            func_info_rec_size,
+            line_info_rec_size,
+        };
+
+        Ok((
+            Program {
+                license: self.license.clone(),
+                kernel_version: self.kernel_version,
+                section: prog_sec,
+                section_index: function.section_index.0,
+                address: function.address,
             },
-        })
+            function,
+        ))
     }
 
     fn parse_text_section(&mut self, section: Section) -> Result<(), ParseError> {
@@ -827,8 +860,8 @@ impl Object {
         {
             parts.push(parts[0]);
         }
-        self.section_sizes
-            .insert(section.name.to_owned(), section.size);
+        self.section_infos
+            .insert(section.name.to_owned(), (section.index, section.size));
         match section.kind {
             BpfSectionKind::Data | BpfSectionKind::Rodata | BpfSectionKind::Bss => {
                 self.maps
@@ -874,7 +907,9 @@ impl Object {
                 res?
             }
             BpfSectionKind::Program => {
-                let program = self.parse_program(&section)?;
+                let (program, function) = self.parse_program(&section)?;
+                self.functions
+                    .insert((function.section_index.0, function.address), function);
                 self.programs
                     .insert(program.section.name().to_owned(), program);
                 if !section.relocations.is_empty() {
@@ -896,9 +931,9 @@ impl Object {
     }
 
     /// Sanitize BPF programs.
-    pub fn sanitize_programs(&mut self, features: &Features) {
-        for program in self.programs.values_mut() {
-            program.sanitize(features);
+    pub fn sanitize_functions(&mut self, features: &Features) {
+        for function in self.functions.values_mut() {
+            function.sanitize(features);
         }
     }
 }
@@ -917,30 +952,6 @@ const BPF_FUNC_PROBE_READ_USER: i32 = 112;
 const BPF_FUNC_PROBE_READ_KERNEL: i32 = 113;
 const BPF_FUNC_PROBE_READ_USER_STR: i32 = 114;
 const BPF_FUNC_PROBE_READ_KERNEL_STR: i32 = 115;
-
-impl Program {
-    fn sanitize(&mut self, features: &Features) {
-        for inst in &mut self.function.instructions {
-            if !insn_is_helper_call(inst) {
-                continue;
-            }
-
-            match inst.imm {
-                BPF_FUNC_PROBE_READ_USER | BPF_FUNC_PROBE_READ_KERNEL
-                    if !features.bpf_probe_read_kernel =>
-                {
-                    inst.imm = BPF_FUNC_PROBE_READ;
-                }
-                BPF_FUNC_PROBE_READ_USER_STR | BPF_FUNC_PROBE_READ_KERNEL_STR
-                    if !features.bpf_probe_read_kernel =>
-                {
-                    inst.imm = BPF_FUNC_PROBE_READ_STR;
-                }
-                _ => {}
-            }
-        }
-    }
-}
 
 // Parses multiple map definition contained in a single `maps` section (which is
 // different from `.maps` which is used for BTF). We can tell where each map is
