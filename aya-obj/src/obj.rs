@@ -106,6 +106,8 @@ pub struct Function {
     pub name: String,
     /// The section index
     pub section_index: SectionIndex,
+    /// The section kind
+    pub section_kind: BpfSectionKind,
     /// The section offset
     pub section_offset: usize,
     /// The eBPF byte code instructions
@@ -675,6 +677,7 @@ impl Object {
         let function = Function {
             name,
             address: section.address,
+            section_kind: section.kind,
             section_index: section.index,
             section_offset: 0,
             instructions: copy_instructions(section.data)?,
@@ -760,6 +763,7 @@ impl Object {
                     address,
                     name: sym.name.clone().unwrap(),
                     section_index: section.index,
+                    section_kind: section.kind,
                     section_offset: offset,
                     instructions: copy_instructions(
                         &section.data[offset..offset + sym.size as usize],

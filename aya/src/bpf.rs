@@ -460,8 +460,9 @@ impl<'a> BpfLoader<'a> {
 
         let text_sections = obj
             .functions
-            .keys()
-            .map(|(section_index, _)| *section_index)
+            .values()
+            .filter(|function| function.section_kind == BpfSectionKind::Text)
+            .map(|function| function.section_index.0)
             .collect();
 
         obj.relocate_maps(

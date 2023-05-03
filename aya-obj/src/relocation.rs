@@ -127,7 +127,11 @@ impl Object {
             }
         }
 
-        for function in self.functions.values_mut() {
+        for function in self
+            .functions
+            .values_mut()
+            .filter(|x| x.section_kind == BpfSectionKind::Text)
+        {
             if let Some(relocations) = self.relocations.get(&function.section_index) {
                 relocate_maps(
                     function,
@@ -427,6 +431,7 @@ impl<'a> FunctionLinker<'a> {
             let callee = self
                 .functions
                 .get(&(callee_section_index, callee_address))
+                .filter(|x| x.section_kind == BpfSectionKind::Text)
                 .ok_or(RelocationError::UnknownFunction {
                     address: callee_address,
                     caller_name: fun.name.clone(),
@@ -554,6 +559,7 @@ mod test {
             address: Default::default(),
             name: name.to_string(),
             section_index: SectionIndex(0),
+            section_kind: BpfSectionKind::Program,
             section_offset: Default::default(),
             instructions,
             func_info: Default::default(),
