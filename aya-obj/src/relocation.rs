@@ -3,7 +3,7 @@
 use core::mem;
 use std::collections::HashSet;
 
-use alloc::{borrow::ToOwned, string::String};
+use alloc::{borrow::ToOwned, collections::BTreeMap, string::String};
 use log::debug;
 use object::{SectionIndex, SymbolKind};
 
@@ -294,7 +294,7 @@ fn relocate_maps<'a, I: Iterator<Item = &'a Relocation>>(
 }
 
 struct FunctionLinker<'a> {
-    functions: &'a HashMap<(usize, u64), Function>,
+    functions: &'a BTreeMap<(usize, u64), Function>,
     linked_functions: HashMap<u64, usize>,
     relocations: &'a HashMap<SectionIndex, HashMap<u64, Relocation>>,
     symbol_table: &'a HashMap<usize, Symbol>,
@@ -303,7 +303,7 @@ struct FunctionLinker<'a> {
 
 impl<'a> FunctionLinker<'a> {
     fn new(
-        functions: &'a HashMap<(usize, u64), Function>,
+        functions: &'a BTreeMap<(usize, u64), Function>,
         relocations: &'a HashMap<SectionIndex, HashMap<u64, Relocation>>,
         symbol_table: &'a HashMap<usize, Symbol>,
         text_sections: &'a HashSet<usize>,

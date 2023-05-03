@@ -904,11 +904,11 @@ pub enum BpfError {
     BtfError(#[from] BtfError),
 
     /// Error performing relocations
-    #[error("error relocating function")]
+    #[error("error relocating function {0}")]
     RelocationError(#[from] BpfRelocationError),
 
     /// Error performing relocations
-    #[error("error relocating section")]
+    #[error("error relocating section: {0}")]
     BtfRelocationError(#[from] BtfRelocationError),
 
     /// No BTF parsed for object
